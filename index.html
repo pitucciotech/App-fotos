@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo AI Local</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <script src="https://unpkg.com/dexie/dist/dexie.js"></script> <style>
+        body { font-family: sans-serif; margin: 0; padding: 15px; background: #f4f4f9; }
+        .controls { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+        input, button { padding: 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; }
+        .album { background: white; padding: 10px; border-radius: 12px; margin-bottom: 15px; shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 5px; }
+        img { width: 100%; height: 80px; object-fit: cover; border-radius: 4px; }
+        #status { font-size: 14px; color: #666; }
+    </style>
+</head>
+<body>
+
+    <h2>Mis Álbumes IA</h2>
+    <div class="controls">
+        <input type="file" id="upload" webkitdirectory directory multiple>
+        <input type="text" id="search" placeholder="Buscar persona...">
+        <div id="status">Esperando modelos...</div>
+    </div>
+
+    <div id="gallery"></div>
+
+    <script>
+        // --- 1. CONFIGURACIÓN DE BASE DE DATOS ---
+        const db = new Dexie("PhotoDatabase");
+        db.version(1).stores({
+            photos: "++id, name, descriptor, group"
+        });
+
+        const status = document.getElementById('status');
+        const gallery = document.getElementById('gallery');
+
+        // --- 2. CARGA DE MODELOS ---
+        async function init() {
+            const URL_MODELOS = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
+            await faceapi.nets.tinyFaceDetector.loadFromUri(URL_MODELOS); // Versión rápida para móviles
+            await faceapi.nets.faceLandmark68Net.loadFromUri(URL_MODELOS);
+            await faceapi.nets.faceRecognitionNet.loadFromUri(URL_MODELOS);
+            status.innerText = "Modelos listos. Selecciona tu carpeta de fotos.";
+            mostrarAlbumesGuardados();
+        }
+
+        // --- 3. PROCESAMIENTO Y CLUSTERING ---
+        document.getElementById('upload').addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
+            status.innerText = `Procesando ${files.length} fotos...`;
+
+            for (const file of files) {
+                const img = await faceapi.bufferToImage(file);
+                const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+                                               .withFaceLandmarks().withFaceDescriptor();
+                
+                if (detection) {
+                    // Guardamos el descriptor (Convertido a Array para IndexedDB)
+                    await db.photos.add({
+                        name: file.name,
+                        descriptor: Array.from(detection.descriptor),
+                        blob: file // Guardamos el archivo real
+                    });
+                }
+            }
+            await agruparYRenderizar();
+        });
+
+        async function agruparYRenderizar() {
+            const todas = await db.photos.toArray();
+            const grupos = [];
+            const UMBRAL = 0.6;
+
+            todas.forEach(foto => {
+                let found = false;
+                for (let g of grupos) {
+                    const dist = faceapi.euclideanDistance(foto.descriptor, g.master);
+                    if (dist < UMBRAL) {
+                        g.fotos.push(foto);
+                        found = true; break;
+                    }
+                }
+                if (!found) grupos.push({ master: foto.descriptor, fotos: [foto] });
+            });
+
+            render(grupos);
+        }
+
+        function render(grupos) {
+            gallery.innerHTML = "";
+            grupos.forEach((g, i) => {
+                const div = document.createElement('div');
+                div.className = 'album';
+                div.innerHTML = `<h3>Persona ${i+1}</h3><div class="grid"></div>`;
+                const grid = div.querySelector('.grid');
+                g.fotos.forEach(f => {
+                    const img = document.createElement('img');
+                    img.src = URL.createObjectURL(f.blob);
+                    grid.appendChild(img);
+                });
+                gallery.appendChild(div);
+            });
+            status.innerText = "Organización completada.";
+        }
+
+        async function mostrarAlbumesGuardados() {
+            const count = await db.photos.count();
+            if (count > 0) agruparYRenderizar();
+        }
+
+        init();
+    </script>
+</body>
+</html>
